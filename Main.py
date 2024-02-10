@@ -3,75 +3,52 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import random
+import argparse
 from tqdm import tqdm
 from torch.utils.data import Dataset, Subset, DataLoader
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 import cipher as cp
 from MyDataset import Seq2SeqDataset
 from EarlyStopping import EarlyStopping
-from Model import Encoder, Decoder, Seq2Seq
-from Attention import AEncoder, ADecoder, ASeq2Seq
+#from Model import Encoder, Decoder, Seq2Seq
+from EffectTest import Effect_Test
+from Network.Modules import Transformer
 
 
 class ModelWorking():
     def __init__(self):
-        self.seed = 19
+        
+        self.args = self.get_args()
+        print(f"Using {self.args.device} device now.")
+        
+        # Set seed
         self.set_seed()
         
-        # self.aa_file_path = './data/aa_data.fasta'
-        # self.dna_file_path = './data/dna_data.fasta'
-        self.aa_file_path = './data/aa_data_nonrepetitive.fasta'
-        self.dna_file_path = './data/dna_data_nonrepetitive.fasta'
-        
-        self.save_path = 'best_model.pth'
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"Using {self.device} device.")
-        
-        self.batch_size = 64
-        self.max_length = 700
-        self.input_dim = 21  # ACDEFGHIKLMNPQRSTVWY*
-        self.output_dim = 64  # AGTC ** 3
-        self.encoder_emb_dim = 128
-        self.decoder_emb_dim = 128
-        self.hidden_dim = 256
-        self.pf_dim = 256
-        self.n_layers = 3
-        self.n_heads = 8
-        self.dropout = 0.1
-        
-        self.learning_rate = 8e-3
-        self.weight_decay = 1e-5
-        self.epoch_num = 20
-        self.clip = 1
-        self.patience = 5
+        assert self.args.encoder_emb_dim == self.args.decoder_emb_dim, "Embedding dimensions of encoder and decoder should be equal!"
+        assert self.args.d_k_and_d_v == self.args.decoder_emb_dim // self.args.n_heads, "d_k and d_v should be equal to decoder embedding dimension divided by number of heads!"
 
-        self.encoder = Encoder(self.input_dim, self.encoder_emb_dim, self.hidden_dim, self.n_layers,self.dropout).to(self.device)
-        self.decoder = Decoder(self.output_dim, self.decoder_emb_dim, self.hidden_dim, self.n_layers,  self.dropout).to(self.device)
-        self.model = Seq2Seq(self.encoder, self.decoder, self.device).to(self.device)
-        self.early_stopping = EarlyStopping(patience=self.patience, checkpoint_path=self.save_path, mode='max')
+        self.early_stopping = EarlyStopping(patience=self.args.patience, checkpoint_path=self.args.save_path, mode='max')
 
-        # self.aencoder = AEncoder(self.input_dim, self.encoder_emb_dim, self.hidden_dim, self.n_layers, self.dropout).to(self.device)
-        # self.adecoder = ADecoder(self.output_dim, self.decoder_emb_dim, self.hidden_dim, self.n_layers, self.dropout, self.n_heads).to(self.device)
-        # self.model = ASeq2Seq(self.aencoder, self.adecoder, self.device).to(self.device)
+        self.model = Transformer(n_src_vocab=self.args.input_dim, n_trg_vocab=self.args.output_dim, src_pad_idx=self.args.pad_idx, trg_pad_idx=self.args.pad_idx, d_word_vec=self.args.encoder_emb_dim, d_model=self.args.decoder_emb_dim, d_inner=self.args.hidden_dim, n_layers=self.args.n_layers, n_head=self.args.n_heads, d_k=self.args.d_k_and_d_v, d_v=self.args.d_k_and_d_v, dropout=self.args.dropout, n_position=self.args.max_length, trg_emb_prj_weight_sharing=True, emb_src_trg_weight_sharing=True, scale_emb_or_prj='prj').to(self.args.device)
         
         # Define your loss function and optimizer
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
         
-        all_dataset = Seq2SeqDataset(self.aa_file_path, self.dna_file_path)
+        all_dataset = Seq2SeqDataset(self.args.aa_file_path, self.args.dna_file_path)
         
         # shuffle all data
         indices = list(range(all_dataset.data_size()))
         random.shuffle(indices)
 
         # divide train/validation/test dataset
-        self.train_ratio = 0.06
-        self.val_ratio = 0.02
-        self.test_ratio = 0.01
+        train_ratio = 0.06
+        val_ratio = 0.03
+        test_ratio = 0.01
 
-        train_size = int(self.train_ratio * len(indices))
-        val_size = int(self.val_ratio * len(indices))
-        test_size = int(self.test_ratio * len(indices))
+        train_size = int(train_ratio * len(indices))
+        val_size = int(val_ratio * len(indices))
+        test_size = int(test_ratio * len(indices))
 
         train_indices = indices[:train_size]
         val_indices = indices[train_size:train_size + val_size]
@@ -82,27 +59,53 @@ class ModelWorking():
         test_dataset = Subset(all_dataset, test_indices)
         
         # Create data_loader
-        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, collate_fn=lambda x: {'input': pad_sequence([item['input'] for item in x], batch_first=True, padding_value=0),'target': pad_sequence([item['target'] for item in x], batch_first=True, padding_value=0)})
-        self.validation_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=True, collate_fn=lambda x: {'input': pad_sequence([item['input'] for item in x], batch_first=True, padding_value=0),'target': pad_sequence([item['target'] for item in x], batch_first=True, padding_value=0)})
-        self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=True, collate_fn=lambda x: {'input': pad_sequence([item['input'] for item in x], batch_first=True, padding_value=0),'target': pad_sequence([item['target'] for item in x], batch_first=True, padding_value=0)})
-        # self.validation_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=True, collate_fn=lambda x: pad_sequence(x, batch_first=True, padding_value=-1))
-        # self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=True, collate_fn=lambda x: pad_sequence(x, batch_first=True, padding_value=-1))
+        self.train_loader = DataLoader(train_dataset, batch_size=self.args.batch_size, shuffle=True, collate_fn=lambda x: {'input': pad_sequence([item['input'] for item in x], batch_first=True, padding_value=0),'target': pad_sequence([item['target'] for item in x], batch_first=True, padding_value=0)})
+        self.validation_loader = DataLoader(val_dataset, batch_size=self.args.batch_size, shuffle=True, collate_fn=lambda x: {'input': pad_sequence([item['input'] for item in x], batch_first=True, padding_value=0),'target': pad_sequence([item['target'] for item in x], batch_first=True, padding_value=0)})
+        self.test_loader = DataLoader(test_dataset, batch_size=self.args.batch_size, shuffle=False, collate_fn=lambda x: {'input': pad_sequence([item['input'] for item in x], batch_first=True, padding_value=0),'target': pad_sequence([item['target'] for item in x], batch_first=True, padding_value=0)})
+        
+        self.Test=Effect_Test(self.model, self.test_loader, self.criterion, self.args.device, self.args.output_dim)
 
+    def get_args(self):
+        parser = argparse.ArgumentParser()
+        
+        parser.add_argument('--seed', type=int, default=19, help='random seed')
+        parser.add_argument('--device', type=str, default='cuda', help='device')
+        parser.add_argument('--batch_size', type=int, default=16, help='batch size')
+        parser.add_argument('--pad_idx', type=int, default=0, help='pad index')
+        parser.add_argument('--clip', type=int, default=1, help='clip')
+        
+        parser.add_argument('--max_length', type=int, default=700, help='max length')
+        parser.add_argument('--input_dim', type=int, default=21, help='input dimension')
+        parser.add_argument('--output_dim', type=int, default=64, help='output dimension')
+        parser.add_argument('--encoder_emb_dim', type=int, default=256, help='encoder embedding dimension')
+        parser.add_argument('--decoder_emb_dim', type=int, default=256, help='decoder embedding dimension')
+        parser.add_argument('--d_k_and_d_v', type=int, default=32, help='d_k and d_v')
+        
+        parser.add_argument('--hidden_dim', type=int, default=2048, help='hidden dimension')       
+        parser.add_argument('--n_layers', type=int, default=6, help='number of layers')
+        parser.add_argument('--n_heads', type=int, default=8, help='number of heads')
+        parser.add_argument('--dropout', type=float, default=0.1, help='dropout')
+        parser.add_argument('--learning_rate', type=float, default=3e-2, help='learning rate')
+        parser.add_argument('--weight_decay', type=float, default=1e-4, help='weight decay')
+        
+        parser.add_argument('--epoch_num', type=int, default=3, help='number of epochs')
+        parser.add_argument('--patience', type=int, default=1, help='patience')
+        
+        parser.add_argument('--aa_file_path', type=str, default='./data/aa_data_nonrepetitive.fasta', help='AA file path')
+        parser.add_argument('--dna_file_path', type=str, default='./data/dna_data_nonrepetitive.fasta', help='DNA file path')
+        parser.add_argument('--save_path', type=str, default='best_model.pth', help='save path')
+        
+        return parser.parse_args()
+        
     def set_seed(self):
-        torch.manual_seed(self.seed)
-        torch.cuda.manual_seed(self.seed)
-        np.random.seed(self.seed)
-        random.seed(self.seed)
+        torch.manual_seed(self.args.seed)
+        torch.cuda.manual_seed(self.args.seed)
+        np.random.seed(self.args.seed)
+        random.seed(self.args.seed)
         torch.backends.cudnn.deterministic = True
 
-    # def find_nearest(self, array, value):
-    #     array = torch.tensor(array).to(self.device)
-    #     idx = (torch.abs(array - value)).argmin()
-    #     #idx = (np.abs(array - value)).argmin()
-    #     return array[idx]
-
     def find_nearest(self, array, value):
-        array = torch.tensor(array).to(self.device)
+        array = torch.tensor(array).to(self.args.device)
         idx = (torch.abs(array - value)).argmin()
         return array[idx]
       
@@ -114,38 +117,41 @@ class ModelWorking():
         
         with tqdm(total=len(self.train_loader), desc=f'Training[epoch{epoch+1}]', unit='batch') as pbar:
             for i, batch in enumerate(self.train_loader):
-                # batch = pack_padded_sequence(padded_batch, lengths=[len(seq) for seq in padded_batch], batch_first=True, enforce_sorted=False)
-                src = batch['input'].transpose(0,1).to(self.device)
-                trg = batch['target'].transpose(0,1).to(self.device)
+              
+                src = batch['input'].to(self.args.device)
+                trg = batch['target'].to(self.args.device)
                 
                 #check
                 if(len(src)!=len(trg)):
                     pbar.update(1)
                     continue
                 
-                self.optimizer.zero_grad() 
-                #print("src:",src.shape,"\ntrg",trg.shape,"\n")  #############             
+                self.optimizer.zero_grad()            
                 output = self.model(src, trg)               
-                output_dim = output.shape[-1]                
-                output = output[1:].view(-1, output_dim)
-                trg = trg[1:].reshape(-1)
-                loss = self.criterion(output, trg)               
+                output_dim = output.shape[-1]
+              
+                output = output.view(-1, output_dim)
+                trg = trg.view(-1)
+                
+                loss = self.criterion(output, trg)                
                 loss.backward()                
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)               
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip)               
                 self.optimizer.step()               
                 epoch_loss += loss.item()  
 
                 # Convert output to predicted tokens
-                output = output.view(-1, self.output_dim)
-                pred = output.argmax(1).to(self.device)
+                # output = output.view(-1, self.output_dim)
+                
+                pred = output.argmax(1).to(self.args.device)
                 
                 # Find the nearest value in degeneracy_table
                 # pred = [self.find_nearest(cp.degeneracy_table[str(src[i+1].item())], pred[i]) for i in range(len(src)-1)]
                 
-                pred = torch.stack([self.find_nearest(cp.degeneracy_table[str(s.item())], p) for s, p in zip(src[1:].flatten(), pred)])
-                pred = torch.tensor(pred).to(self.device)
+                pred = torch.stack([self.find_nearest(cp.degeneracy_table[str(s.item())], p) for s, p in zip(src.flatten(), pred)])
+                pred = torch.tensor(pred).to(self.args.device)
                 
                 # Calculate accuracy
+                
                 correct = (pred == trg).float()
                 mask = (trg != 0).float()  # create a mask to ignore padding tokens
                 accuracy = (correct * mask).sum() / mask.sum()  # calculate accuracy for each sequence
@@ -167,28 +173,28 @@ class ModelWorking():
         with torch.no_grad():
             with tqdm(total=len(self.validation_loader), desc="Evaluating") as pbar:
                 for i, batch in enumerate(self.validation_loader):
-                    src = batch['input'].transpose(0, 1).to(self.device)
-                    trg = batch['target'].transpose(0, 1).to(self.device)
+
+                    src = batch['input'].to(self.args.device)
+                    trg = batch['target'].to(self.args.device)
                     
                     #check
                     if(len(src)!=len(trg)):
                         pbar.update(1)
                         continue
                       
-                    output = self.model(src, trg, 0)
+                    output = self.model(src, trg)
                     output_dim = output.shape[-1]
-                    output = output[1:].view(-1, output_dim)
-                    trg = trg[1:].reshape(-1)
+                    output = output.view(-1, output_dim)
+                    trg = trg.reshape(-1)
                     loss = self.criterion(output, trg)
                     epoch_loss += loss.item()
                     
                     # Convert output to predicted tokens
-                    output = output.view(-1, self.output_dim)
-                    pred = output.argmax(1).to(self.device)
+                    pred = output.argmax(1).to(self.args.device)
+                    
                     # Find the nearest value in degeneracy_table
-                    #pred = [self.find_nearest(cp.degeneracy_table[str(src[i+1].item())], pred[i]) for i in range(len(src)-1)]
-                    pred = torch.stack([self.find_nearest(cp.degeneracy_table[str(s.item())], p) for s, p in zip(src[1:].flatten(), pred)])
-                    pred = torch.tensor(pred).to(self.device)
+                    pred = torch.stack([self.find_nearest(cp.degeneracy_table[str(s.item())], p) for s, p in zip(src.flatten(), pred)])
+                    pred = torch.tensor(pred).to(self.args.device)
                     # Calculate accuracy
 
                     correct = (pred == trg).float()
@@ -213,8 +219,8 @@ class ModelWorking():
         with torch.no_grad():
             with tqdm(total=len(self.test_loader), desc="Testing") as pbar:
                 for i, batch in enumerate(self.test_loader):
-                    src = batch['input'].transpose(0, 1).to(self.device)
-                    trg = batch['target'].transpose(0, 1).to(self.device)
+                    src = batch['input'].to(self.args.device)
+                    trg = batch['target'].to(self.args.device)
                     
                     #check
                     if(len(src)!=len(trg)):
@@ -229,14 +235,14 @@ class ModelWorking():
                     epoch_loss += loss.item()
                     
                     # Convert output to predicted tokens
-                    output = output.view(-1, self.output_dim)
-                    pred = output.argmax(1).to(self.device)
+                    output = output.view(-1, self.args.output_dim)
+                    pred = output.argmax(1).to(self.args.device)
+                    
                     # Find the nearest value in degeneracy_table
-                    # pred = [self.find_nearest(cp.degeneracy_table[str(src[i+1].item())], pred[i]) for i in range(len(src)-1)]
                     pred = torch.stack([self.find_nearest(cp.degeneracy_table[str(s.item())], p) for s, p in zip(src[1:].flatten(), pred)])
-                    pred = torch.tensor(pred).to(self.device)
+                    pred = torch.tensor(pred).to(self.args.device)
+                    
                     # Calculate accuracy
-
                     correct = (pred == trg).float()
                     mask = (trg != 0).float()  # create a mask to ignore padding tokens
                     accuracy = (correct * mask).sum() / mask.sum()  # calculate accuracy for each sequence
@@ -257,7 +263,7 @@ class ModelWorking():
 
     def main(self):
         with open('accuracy_record.txt', 'w') as file:
-            for epoch in range(self.epoch_num):
+            for epoch in range(self.args.epoch_num):
                 _, train_accuracy = self.train(epoch)
                 _, validation_accuracy = self.evaluate()
                 
@@ -271,7 +277,8 @@ class ModelWorking():
                     
         with open('accuracy_record.txt', 'a') as file:
             self.early_stopping.load_checkpoint(self.model)
-            test_accuracy = self.test()
+            # test_accuracy = self.test()
+            test_accuracy=self.Test.test()
             file.write(f"\nTest accuracy: {test_accuracy}\n")
 
 # Main
