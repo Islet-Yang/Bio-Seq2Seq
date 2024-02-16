@@ -1,4 +1,7 @@
 
+# Cipher stores the cipher for the DNA and amino acid alphabets.
+# degenracy_table stores the degeneracy of each codon. The codons are represneted in a exquisitely designed way.
+
 dna_aa_alphabet = {'AAA':'a','AAT':'b','AAG':'c','AAC':'d','ATA':'e','ATT':'f','ATG':'g','ATC':'h',
                     'AGA':'i','AGT':'j','AGG':'k','AGC':'l','ACA':'m','ACT':'n','ACG':'o','ACC':'p',
                     'TAA':'q','TAT':'r','TAG':'s','TAC':'t','TTA':'u','TTT':'v','TTG':'w','TTC':'x',
